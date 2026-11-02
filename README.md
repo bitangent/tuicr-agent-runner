@@ -1,13 +1,16 @@
 # tuicr-agent-runner
 
-A small local CLI: **review in tuicr → prepare a feedback batch → inspect → run a
-fresh `claude -p`**. No persistent conversation, daemon, polling loop, TCP service,
-MCP server, scheduler, or changes to tuicr.
+A small local helper: **review in tuicr → explicitly Send to Claude → a fresh
+`claude -p` for that batch**. Start the watcher once; it serially delivers the same
+Markdown that `y` copies. Your Claude workflow chooses the destination worktree.
+The helper is persistent; Claude conversations are not. No TCP service, daemon
+installation, scheduler, autostart, or clipboard monitoring.
 
 ## Install
 
-Requires Python 3.11+, Git, [uv](https://docs.astral.sh/uv/), tuicr and an installed,
-authenticated Claude Code CLI. macOS and Linux only.
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), a compatible tuicr build,
+and an installed, authenticated Claude Code CLI. macOS and Linux only. The legacy
+manual mode additionally requires Git.
 
 ```sh
 git clone https://github.com/bitangent/tuicr-agent-runner.git
@@ -16,7 +19,114 @@ uv tool install .
 tuicr-agent-runner --help
 ```
 
-## One feedback round
+## Start once, then send from tuicr
+
+Use a tuicr build that includes **Send to Claude** (see compatibility below).
+Start the foreground helper in a separate terminal, with the starting directory
+where your usual Claude workflow/configuration lives:
+
+```sh
+tuicr-agent-runner watch --launch-dir /path/to/claude-starting-directory --trust-config
+```
+
+Keep reviewing in tuicr. When a batch is ready, press **`;` then `a`** (the default
+`<leader>a` binding), or run **`:send-agent`**. `send_to_agent` is the configurable
+binding. The helper starts one fresh Claude process, streams progress, records its
+outcome, then waits for the next explicit batch. It uses the entire configured
+`y` export, not only visible/filtered or newly added comments. Repeating send with
+an unchanged export in the same tuicr process is deduplicated by tuicr. Use
+`:send-agent!` only for an intentional resend after inspecting previous results; it creates a new batch ID.
+A new ID is a new request, not content-level deduplication in the runner.
+
+**Saving comments does not run Claude.** Neither `y` nor changing a review/session
+file triggers execution. You can send while the helper is stopped; submissions
+remain durable until it next starts. A queued batch is a snapshot, not a live view
+of later edits. Sending does not clear comments, mark them addressed, or submit a
+remote PR review.
+
+`--launch-dir` is an actual process working directory and need not be a Git
+repository. The helper does not check out a PR, validate a target checkout, add
+routing text, or alter exported Markdown. If your Claude workflow needs commit/PR
+identity, keep that information enabled in tuicr's export settings. Configure the
+permissions and instructions your workflow needs in that starting directory/user
+configuration; the watcher cannot infer the eventual destination.
+
+### Queue and records
+
+By default both programs use the same private per-user queue:
+
+- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/tuicr/agent-queue` (an explicitly
+  empty or relative `XDG_STATE_HOME` is rejected).
+- macOS: `$HOME/Library/Application Support/tuicr/agent-queue`.
+
+Set **`TUICR_AGENT_QUEUE_DIR` in both terminals** for a custom absolute path, or
+pass `watch --queue-dir /absolute/path` and set the same path in tuicr's
+`agent_queue_dir` configuration. These are local files, never a public service.
+Read the [small versioned spool contract](docs/SPOOL.md) for limits and publication
+semantics. The watcher polls the pending directory every second by default
+(`--poll-interval`), not native filesystem events or saved comments. Polling never
+starts Claude while idle. `--once` processes the current queue snapshot and exits.
+
+```sh
+tuicr-agent-runner jobs  # Add --queue-dir for an explicit custom queue.
+```
+
+Records and original submissions live in `QUEUE/jobs/BATCH_ID/`; invalid filenames
+and duplicate submissions are preserved in `QUEUE/rejected/`; `jobs` lists both.
+The original
+Markdown and stdout/stderr may contain private source code. Keep the queue private
+and local; do not publish it. New POSIX directories/files are private; existing
+public or symlinked state is rejected, not silently chmodded. No automatic cleanup.
+
+Only one watcher may use a queue, regardless of launch directory. Jobs run
+serially because their eventual target is unknown. This is **not** a lock against
+other queues, editors, Git, legacy manual runners, or unrelated agents.
+
+Ctrl-C/SIGTERM cancels the current local process group **and stops the watcher**;
+unclaimed queued batches remain for the next start. Per-batch `--timeout` defaults
+to 900 seconds. Failed, denied, or timed-out batches are recorded and never retried;
+the watcher continues with subsequent queued batches. Partial edits are not rolled
+back. Process-group cancellation cannot stop remote work or detached descendants.
+
+After SIGKILL/host crash, the watcher refuses all new jobs if any claim is
+incomplete or still `claimed`/`running`, rather than overlap an orphaned Claude.
+Inspect its logs and partial edits and stop any surviving process yourself. Then:
+
+```sh
+tuicr-agent-runner acknowledge-interrupted BATCH_ID --confirm-stopped
+# Add --queue-dir if needed. Restart watch after acknowledging interrupted jobs.
+```
+
+This permanently marks the old ID `interrupted`; it does **not** retry it or prove
+that the process has stopped. Review current code before explicitly sending a new
+batch. Never delete attempt records as a shortcut to retry.
+
+### Watch permissions and trust
+
+`--trust-config` acknowledges that headless Claude loads user/project instructions,
+configuration, plugins, hooks, and configured MCP servers without workspace trust
+dialogs. Trust the queue writers and every directory your workflow will use.
+The watcher passes `--permission-mode dontAsk`: permission checks still apply and
+calls that would prompt are denied. It does not force a tools list, block your MCP
+workflow, preapprove edits, or bypass permissions. Your existing rules/hooks apply;
+repeat `--allow-tool 'Bash(your-command*)'` only for approvals you intend to grant.
+Reported permission denials are terminal failures, never retried with broader access.
+
+The exact export is the entire user prompt: the watcher adds **no** worktree,
+commit/push/merge prohibition, or other instructions. The runner does not itself
+invoke those actions; your Claude instructions and permissions govern what Claude
+may do. This is not a sandbox. Normal Claude authentication/billing apply and real
+batches send their Markdown to your configured provider. No real Claude request
+has been used for development tests.
+
+## Legacy manual prepare / show / run
+
+These commands remain available for users who deliberately want checkout-locked
+snapshots and approval hashes. Their validation and restricted tools policy are
+unchanged; they are separate from the watcher and **not required** for Send to
+Claude. The following sections describe this original manual mode.
+
+### One feedback round
 
 Start in the **exact worktree you want Claude to edit**. Save your tuicr comments,
 then use another terminal (or exit tuicr):
@@ -54,8 +164,8 @@ tuicr-agent-runner run --repo "$PWD" BATCH_ID --approve APPROVAL_SHA256 --trust-
 
 Each batch can be attempted **once**. For any retry, inspect partial edits and
 prepare/review a new batch. After completion, inspect `git diff`, check tests,
-and refresh/reopen the intended review in tuicr. There is no automatic refresh
-integration and no `tuicr watch` command supplied here.
+and refresh/reopen the intended review in tuicr. There is no automatic review
+refresh integration.
 
 ### GitHub PR feedback
 
@@ -70,7 +180,7 @@ Other forges are not yet
 supported. It does not check whether the remote PR has advanced since the saved
 review; deliberately reviewing an older head remains possible.
 
-## What gets checked
+### What manual mode checks
 
 - Exact session ID/path and local worktree identity, or GitHub PR identity.
 - Matching reviewed revision/branch; commit-range reviews must end at `HEAD`
@@ -91,7 +201,7 @@ and single-commit comments. Current line snippets are not historical context.
 Do not edit the checkout or its review concurrently: the lock only coordinates
 this runner, not editors, Git, tuicr, or other agents.
 
-## Permissions and trust
+### Manual-mode permissions and trust
 
 **Only use trusted repositories and trusted Claude configuration.** Running
 `claude -p` loads user/project configuration, instructions, plugins and hooks;
@@ -118,7 +228,7 @@ See the official [headless guide](https://code.claude.com/docs/en/headless),
 [CLI flags](https://code.claude.com/docs/en/cli-reference) and
 [permissions](https://code.claude.com/docs/en/permissions).
 
-## Progress, cancellation and records
+### Manual-mode progress, cancellation and records
 
 Assistant text and tool names stream to the terminal; complete stdout/stderr
 and the final structured result are kept privately under:
@@ -152,7 +262,10 @@ at 64 MiB per job, 8 MiB per JSON record. There is no output redaction.
 
 ## Compatibility and development
 
-- Tuicr integration targets **bitangent/tuicr 0.28.0, commit
+- Watch mode needs the companion **bitangent/tuicr Send to Claude** change
+  (`send_to_agent` / `:send-agent`, spool v1). An older tuicr build does not publish
+  submissions; watching saved session files is intentionally unsupported.
+- Legacy manual integration targets **bitangent/tuicr 0.28.0, commit
   `8d4054d7995aa8c8a7363e24625c1da1f8d7a65a`**, session schema **1.3** and its
   [`review list/comments` contract](https://github.com/bitangent/tuicr/blob/8d4054d7995aa8c8a7363e24625c1da1f8d7a65a/docs/REVIEW_CLI.md).
   Version number alone does not guarantee those commands exist in another build.
@@ -160,11 +273,14 @@ at 64 MiB per job, 8 MiB per JSON record. There is no output redaction.
   No real Claude version has been integration-tested yet: tests use fake
   executables only, never transmit a repository or consume model credits.
   A compatible CLI must support `-p --output-format stream-json --verbose`,
-  `dontAsk`, `--tools`, `--disallowedTools`, and `--allowedTools`.
+  `dontAsk`, and `--allowedTools`; legacy manual mode also uses `--tools` and
+  `--disallowedTools`.
 - No runtime dependencies. CI runs synthetic subprocess/Git tests on Python
   3.11–3.13 on Linux. macOS remains supported, but is not CI-verified.
-  No Windows, jj/hg, daemon, auto-commit, push, merge, remote comment ingestion,
-  publishing, or release automation.
+  No Windows runner, daemon service, autostart, automatic Git operations, or
+  publishing/release automation. Watch mode is VCS-agnostic: it delivers the full
+  export (including any upstream threads) without fetching remote comments or
+  reading VCS/session state itself. Legacy manual mode is Git-only.
 
 ```sh
 uv sync --locked
