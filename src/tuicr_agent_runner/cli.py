@@ -1,4 +1,4 @@
-"""Small explicit prepare → inspect → run workflow."""
+"""Explicit queued delivery, plus the original prepare → inspect → run workflow."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .core import (
     write_json,
 )
 from .process import display, run_process
+from .queue import acknowledge_interrupted, queue_jobs, watch
 
 BUILTIN_TOOLS = "Read,Glob,Grep,Edit,Write,Bash"
 DEFAULT_APPROVALS = ["Read", "Glob", "Grep", "Edit", "Write"]
@@ -31,7 +32,7 @@ DEFAULT_APPROVALS = ["Read", "Glob", "Grep", "Edit", "Write"]
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        description="Prepare an explicit tuicr feedback batch, inspect it, then run fresh Claude."
+        description="Watch explicit tuicr submissions; launch fresh Claude one batch at a time."
     )
     root.add_argument("--version", action="version", version="tuicr-agent-runner 0.1.0")
     commands = root.add_subparsers(dest="command", required=True)
@@ -64,8 +65,58 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         help="Additional Claude preapproval, e.g. 'Bash(uv run pytest*)'; repeatable",
     )
-    jobs = commands.add_parser("jobs", help="List local job outcomes/log paths")
-    for sub in (prep, show, run, jobs):
+    watcher = commands.add_parser(
+        "watch", help="Watch explicit tuicr submissions; launch fresh Claude serially"
+    )
+    watcher.add_argument(
+        "--queue-dir", help="Absolute spool path (or TUICR_AGENT_QUEUE_DIR/platform default)"
+    )
+    watcher.add_argument(
+        "--launch-dir",
+        required=True,
+        help="Claude starting directory; your workflow chooses its worktree",
+    )
+    watcher.add_argument(
+        "--trust-config",
+        action="store_true",
+        help="Acknowledge inherited Claude configuration and queue writers",
+    )
+    watcher.add_argument(
+        "--claude", default="claude", help="Claude executable, not a shell command"
+    )
+    watcher.add_argument(
+        "--timeout", type=float, default=900, help="Per-batch wall-clock seconds (default: 900)"
+    )
+    watcher.add_argument(
+        "--poll-interval", type=float, default=1, help="Directory polling seconds (default: 1)"
+    )
+    watcher.add_argument(
+        "--allow-tool",
+        action="append",
+        default=[],
+        help="Additional explicit Claude preapproval; repeatable",
+    )
+    watcher.add_argument(
+        "--once", action="store_true", help="Process the current queue snapshot, then exit"
+    )
+    acknowledge = commands.add_parser(
+        "acknowledge-interrupted",
+        help="After inspection, mark a crashed attempt stopped; never rerun it",
+    )
+    acknowledge.add_argument("batch")
+    acknowledge.add_argument("--queue-dir")
+    acknowledge.add_argument(
+        "--confirm-stopped",
+        action="store_true",
+        help="Confirm no orphaned Claude remains and partial edits were inspected",
+    )
+    jobs = commands.add_parser(
+        "jobs", help="List queue job outcomes/log paths (or legacy worktree jobs)"
+    )
+    source = jobs.add_mutually_exclusive_group()
+    source.add_argument("--queue-dir", help="Queue path (defaults to env/platform default)")
+    source.add_argument("--repo", help="List legacy worktree job records instead")
+    for sub in (prep, show, run):
         sub.add_argument("--repo", required=True, help="Explicit Git worktree root")
     return root
 
@@ -166,6 +217,13 @@ def execute(repo: Path, args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "watch":
+            return watch(args)
+        if args.command == "acknowledge-interrupted":
+            return acknowledge_interrupted(args)
+        if args.command == "jobs" and not args.repo:
+            queue_jobs(args.queue_dir)
+            return 0
         repo = repository(args.repo)
         if args.command == "prepare":
             show_batch(prepare(repo, args.session, args.tuicr, args.remote, args.comment))
