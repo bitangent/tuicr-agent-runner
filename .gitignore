@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+.env
+.env.*
+# Runtime artifacts belong in the worktree's Git directory, never this repository.
+.tuicr-agent-runner/
+*.jsonl
