@@ -162,8 +162,9 @@ at 64 MiB per job, 8 MiB per JSON record. There is no output redaction.
   A compatible CLI must support `-p --output-format stream-json --verbose`,
   `dontAsk`, `--tools`, `--disallowedTools`, and `--allowedTools`.
 - No runtime dependencies. CI runs synthetic subprocess/Git tests on Python
-  3.11–3.13, Linux and macOS. No Windows, jj/hg, daemon, auto-commit, push, merge,
-  remote comment ingestion, publishing, or release automation.
+  3.11–3.13 on Linux. macOS remains supported, but is not CI-verified.
+  No Windows, jj/hg, daemon, auto-commit, push, merge, remote comment ingestion,
+  publishing, or release automation.
 
 ```sh
 uv sync --locked
